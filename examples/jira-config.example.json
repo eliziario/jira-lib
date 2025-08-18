@@ -1,0 +1,7 @@
+{
+  "server": "https://your-domain.atlassian.net",
+  "login": "your-email@example.com",
+  "api_token": "your-api-token-here",
+  "default_project": "PROJ",
+  "installation_type": "Cloud"
+}

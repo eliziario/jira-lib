@@ -1,0 +1,46 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+*.out
+
+# Editor files
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Project specific
+.jira/
+dist/
+bin/
+coverage/
+vendor/
+/.gocache
+
+# Config files (be careful with these)
+/*.json
+.env
+*.env
+examples/.env
+
+# Binary output from examples
+jira-basic
+jira-cli
+examples/basic-usage/jira-basic
+examples/advanced-cli/jira-cli
+
+# Temporary files
+*.tmp
+*.bak

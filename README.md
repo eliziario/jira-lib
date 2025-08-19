@@ -44,6 +44,22 @@ While the core Jira API logic comes from jira-cli, we've made significant enhanc
 - Restructured packages for library use
 - Removed vendor lock-in
 
+## ⚠️ Important: Jira Cloud API Changes (v0.4.0+)
+
+As of November 2024, Atlassian has deprecated the traditional search endpoints (`/rest/api/3/search` and `/rest/api/2/search`) for Jira Cloud. This library has been updated to use the new `/rest/api/3/search/jql` endpoint automatically.
+
+### What Changed?
+- **New Endpoint**: Search now uses `/rest/api/3/search/jql` for Cloud instances
+- **Bounded Queries Required**: The new API requires bounded JQL queries (e.g., with date or project restrictions)
+- **Automatic Bounds**: The library automatically adds bounds if your query doesn't have them
+- **Backward Compatible**: Server/Data Center installations continue to use the original endpoints
+
+### Migration Notes
+If you're upgrading from v0.3.0 or earlier:
+- Your existing code should continue to work without changes
+- Unbounded queries will automatically get a 90-day date restriction added
+- Consider adding explicit bounds to your JQL queries for better performance
+
 ## Why This Library?
 
 There are scenarios where you need programmatic access to Jira without CLI overhead:

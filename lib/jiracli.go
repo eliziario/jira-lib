@@ -3,7 +3,10 @@
 package lib
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -379,4 +382,261 @@ func (c *JiraClient) GetRecentIssues(days int, project string) ([]*jira.Issue, e
 		OrderBy:   "created DESC",
 	}
 	return c.GetAllIssues(options)
+}
+
+// StatusChange represents a status transition in issue history.
+type StatusChange struct {
+	// Timestamp when the status change occurred
+	Timestamp time.Time
+	
+	// Author who made the status change
+	Author string
+	
+	// FromStatus is the previous status (empty for initial status)
+	FromStatus string
+	
+	// ToStatus is the new status
+	ToStatus string
+	
+	// AuthorEmail is the email of the person who made the change
+	AuthorEmail string
+	
+	// AuthorDisplayName is the display name of the person who made the change
+	AuthorDisplayName string
+}
+
+// IssueWithChangelog represents an issue with its changelog data.
+type IssueWithChangelog struct {
+	Key       string                 `json:"key"`
+	Fields    jira.IssueFields       `json:"fields"`
+	Changelog *IssueChangelog        `json:"changelog"`
+}
+
+// IssueChangelog represents the changelog section of an issue.
+type IssueChangelog struct {
+	StartAt    int                   `json:"startAt"`
+	MaxResults int                   `json:"maxResults"`
+	Total      int                   `json:"total"`
+	Histories  []IssueHistory        `json:"histories"`
+}
+
+// IssueHistory represents a single history entry.
+type IssueHistory struct {
+	ID      string                `json:"id"`
+	Author  *HistoryAuthor        `json:"author"`
+	Created string                `json:"created"`
+	Items   []HistoryItem         `json:"items"`
+}
+
+// HistoryAuthor represents the author of a history change.
+type HistoryAuthor struct {
+	Name         string `json:"name"`
+	EmailAddress string `json:"emailAddress"`
+	DisplayName  string `json:"displayName"`
+}
+
+// HistoryItem represents a single field change in history.
+type HistoryItem struct {
+	Field      string `json:"field"`
+	FieldType  string `json:"fieldtype"`
+	From       string `json:"from"`
+	FromString string `json:"fromString"`
+	To         string `json:"to"`
+	ToString   string `json:"toString"`
+}
+
+// GetIssueStatusChanges retrieves all status changes for an issue.
+// It fetches the issue with its changelog and extracts status transitions.
+func (c *JiraClient) GetIssueStatusChanges(issueKey string) ([]StatusChange, error) {
+	// Fetch issue with expanded changelog
+	issueWithHistory, err := c.getIssueWithChangelog(issueKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch issue with changelog: %w", err)
+	}
+	
+	// Extract status changes from changelog
+	var statusChanges []StatusChange
+	
+	if issueWithHistory.Changelog != nil {
+		for _, history := range issueWithHistory.Changelog.Histories {
+			for _, item := range history.Items {
+				if item.Field == "status" {
+					// Parse the timestamp
+					timestamp, err := time.Parse(time.RFC3339, history.Created)
+					if err != nil {
+						// Try alternative format
+						timestamp, err = time.Parse("2006-01-02T15:04:05.000-0700", history.Created)
+						if err != nil {
+							// Use current time as fallback
+							timestamp = time.Now()
+						}
+					}
+					
+					change := StatusChange{
+						Timestamp:  timestamp,
+						FromStatus: item.FromString,
+						ToStatus:   item.ToString,
+					}
+					
+					// Add author information if available
+					if history.Author != nil {
+						change.Author = history.Author.Name
+						change.AuthorEmail = history.Author.EmailAddress
+						change.AuthorDisplayName = history.Author.DisplayName
+					}
+					
+					statusChanges = append(statusChanges, change)
+				}
+			}
+		}
+		
+		// Check if we need to fetch more history (pagination)
+		if issueWithHistory.Changelog.Total > issueWithHistory.Changelog.StartAt+issueWithHistory.Changelog.MaxResults {
+			// Fetch additional history pages
+			additionalChanges, err := c.fetchAdditionalHistory(issueKey, issueWithHistory.Changelog.MaxResults)
+			if err == nil {
+				statusChanges = append(statusChanges, additionalChanges...)
+			}
+		}
+	}
+	
+	// Add the initial status as the first change (if we have the created date)
+	if len(statusChanges) > 0 && issueWithHistory.Fields.Created != "" {
+		createdTime, err := time.Parse(time.RFC3339, issueWithHistory.Fields.Created)
+		if err != nil {
+			createdTime, err = time.Parse("2006-01-02T15:04:05.000-0700", issueWithHistory.Fields.Created)
+		}
+		if err == nil {
+			// Find the earliest status change to determine the initial status
+			earliestChange := statusChanges[len(statusChanges)-1]
+			if earliestChange.FromStatus != "" {
+				initialChange := StatusChange{
+					Timestamp:  createdTime,
+					FromStatus: "",
+					ToStatus:   earliestChange.FromStatus,
+				}
+				if issueWithHistory.Fields.Reporter.Name != "" {
+					initialChange.Author = issueWithHistory.Fields.Reporter.Name
+					initialChange.AuthorDisplayName = issueWithHistory.Fields.Reporter.Name
+				}
+				statusChanges = append(statusChanges, initialChange)
+			}
+		}
+	}
+	
+	// Sort by timestamp (oldest first)
+	for i := 0; i < len(statusChanges)/2; i++ {
+		j := len(statusChanges) - 1 - i
+		statusChanges[i], statusChanges[j] = statusChanges[j], statusChanges[i]
+	}
+	
+	return statusChanges, nil
+}
+
+// getIssueWithChangelog fetches an issue with its changelog expanded.
+func (c *JiraClient) getIssueWithChangelog(issueKey string) (*IssueWithChangelog, error) {
+	path := fmt.Sprintf("/issue/%s?expand=changelog", issueKey)
+	
+	ctx := context.Background()
+	var httpRes *http.Response
+	var err error
+	
+	if c.installationType == jira.InstallationTypeLocal {
+		httpRes, err = c.client.GetV2(ctx, path, nil)
+	} else {
+		httpRes, err = c.client.Get(ctx, path, nil)
+	}
+	
+	if err != nil {
+		return nil, err
+	}
+	if httpRes == nil {
+		return nil, fmt.Errorf("empty response")
+	}
+	defer httpRes.Body.Close()
+	
+	if httpRes.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", httpRes.StatusCode)
+	}
+	
+	var issue IssueWithChangelog
+	decoder := json.NewDecoder(httpRes.Body)
+	if err := decoder.Decode(&issue); err != nil {
+		return nil, fmt.Errorf("failed to decode issue with changelog: %w", err)
+	}
+	
+	return &issue, nil
+}
+
+// fetchAdditionalHistory fetches additional history pages if changelog is paginated.
+func (c *JiraClient) fetchAdditionalHistory(issueKey string, startAt int) ([]StatusChange, error) {
+	var allChanges []StatusChange
+	currentStart := startAt
+	ctx := context.Background()
+	
+	for {
+		path := fmt.Sprintf("/issue/%s/changelog?startAt=%d", issueKey, currentStart)
+		
+		var httpRes *http.Response
+		var err error
+		
+		if c.installationType == jira.InstallationTypeLocal {
+			httpRes, err = c.client.GetV2(ctx, path, nil)
+		} else {
+			httpRes, err = c.client.Get(ctx, path, nil)
+		}
+		
+		if err != nil {
+			return allChanges, err
+		}
+		if httpRes == nil {
+			return allChanges, fmt.Errorf("empty response")
+		}
+		defer httpRes.Body.Close()
+		
+		if httpRes.StatusCode != http.StatusOK {
+			return allChanges, fmt.Errorf("unexpected status code: %d", httpRes.StatusCode)
+		}
+		
+		var changelog IssueChangelog
+		decoder := json.NewDecoder(httpRes.Body)
+		if err := decoder.Decode(&changelog); err != nil {
+			return allChanges, err
+		}
+		
+		// Extract status changes
+		for _, history := range changelog.Histories {
+			for _, item := range history.Items {
+				if item.Field == "status" {
+					timestamp, _ := time.Parse(time.RFC3339, history.Created)
+					if timestamp.IsZero() {
+						timestamp, _ = time.Parse("2006-01-02T15:04:05.000-0700", history.Created)
+					}
+					
+					change := StatusChange{
+						Timestamp:  timestamp,
+						FromStatus: item.FromString,
+						ToStatus:   item.ToString,
+					}
+					
+					if history.Author != nil {
+						change.Author = history.Author.Name
+						change.AuthorEmail = history.Author.EmailAddress
+						change.AuthorDisplayName = history.Author.DisplayName
+					}
+					
+					allChanges = append(allChanges, change)
+				}
+			}
+		}
+		
+		// Check if we need more pages
+		if currentStart+len(changelog.Histories) >= changelog.Total {
+			break
+		}
+		
+		currentStart += len(changelog.Histories)
+	}
+	
+	return allChanges, nil
 }

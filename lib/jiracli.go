@@ -4,6 +4,7 @@ package lib
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eliziario/jira-lib/pkg/jira"
@@ -232,4 +233,150 @@ func (c *JiraClient) GetServerInfo() (*jira.ServerInfo, error) {
 // Use this when you need access to methods not exposed by JiraClient.
 func (c *JiraClient) GetRawClient() *jira.Client {
 	return c.client
+}
+
+// GetAllIssuesOptions contains options for fetching all issues.
+type GetAllIssuesOptions struct {
+	// Project filters by project key (optional)
+	Project string
+	
+	// StartDate filters issues created or updated after this date (optional)
+	// Format: "2006-01-02" or "2006-01-02 15:04"
+	StartDate string
+	
+	// DateField specifies which date field to filter on: "created", "updated", or "resolved"
+	// Default is "created"
+	DateField string
+	
+	// MaxResults is the maximum number of issues to return (0 for no limit)
+	MaxResults int
+	
+	// JQL allows passing custom JQL to combine with other filters
+	JQL string
+	
+	// OrderBy specifies the field to order by (default: "created DESC")
+	OrderBy string
+}
+
+// GetAllIssues fetches all issues with optional filtering.
+// This method handles pagination automatically to retrieve all matching issues.
+func (c *JiraClient) GetAllIssues(options GetAllIssuesOptions) ([]*jira.Issue, error) {
+	// Build JQL query
+	var jqlParts []string
+	
+	// Add project filter if specified
+	if options.Project != "" {
+		jqlParts = append(jqlParts, fmt.Sprintf("project = %s", options.Project))
+	}
+	
+	// Add date filter if specified
+	if options.StartDate != "" {
+		dateField := options.DateField
+		if dateField == "" {
+			dateField = "created"
+		}
+		jqlParts = append(jqlParts, fmt.Sprintf("%s >= '%s'", dateField, options.StartDate))
+	}
+	
+	// Add custom JQL if provided
+	if options.JQL != "" {
+		jqlParts = append(jqlParts, fmt.Sprintf("(%s)", options.JQL))
+	}
+	
+	// Combine all JQL parts
+	jql := ""
+	if len(jqlParts) > 0 {
+		jql = strings.Join(jqlParts, " AND ")
+	}
+	
+	// Add ordering
+	if options.OrderBy != "" {
+		jql += fmt.Sprintf(" ORDER BY %s", options.OrderBy)
+	} else {
+		jql += " ORDER BY created DESC"
+	}
+	
+	// Fetch all issues with pagination
+	var allIssues []*jira.Issue
+	const batchSize = 100
+	var startAt uint = 0
+	totalFetched := 0
+	
+	for {
+		// Fetch a batch of issues
+		results, err := c.SearchIssues(jql, startAt, batchSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch issues at offset %d: %w", startAt, err)
+		}
+		
+		// Add issues to our collection
+		allIssues = append(allIssues, results.Issues...)
+		totalFetched += len(results.Issues)
+		
+		// Check if we've reached the limit (if set)
+		if options.MaxResults > 0 && totalFetched >= options.MaxResults {
+			// Trim to exact max results
+			if len(allIssues) > options.MaxResults {
+				allIssues = allIssues[:options.MaxResults]
+			}
+			break
+		}
+		
+		// Check if we've fetched all issues
+		if startAt+uint(len(results.Issues)) >= uint(results.Total) {
+			break
+		}
+		
+		// No more issues returned
+		if len(results.Issues) == 0 {
+			break
+		}
+		
+		// Prepare for next batch
+		startAt += batchSize
+	}
+	
+	return allIssues, nil
+}
+
+// GetIssuesByDateRange fetches issues created or updated within a date range.
+func (c *JiraClient) GetIssuesByDateRange(startDate, endDate string, dateField string) ([]*jira.Issue, error) {
+	if dateField == "" {
+		dateField = "created"
+	}
+	
+	jql := fmt.Sprintf("%s >= '%s' AND %s <= '%s' ORDER BY %s DESC", 
+		dateField, startDate, dateField, endDate, dateField)
+	
+	var allIssues []*jira.Issue
+	const batchSize = 100
+	var startAt uint = 0
+	
+	for {
+		results, err := c.SearchIssues(jql, startAt, batchSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch issues: %w", err)
+		}
+		
+		allIssues = append(allIssues, results.Issues...)
+		
+		if startAt+uint(len(results.Issues)) >= uint(results.Total) || len(results.Issues) == 0 {
+			break
+		}
+		
+		startAt += batchSize
+	}
+	
+	return allIssues, nil
+}
+
+// GetRecentIssues fetches issues from the last N days.
+func (c *JiraClient) GetRecentIssues(days int, project string) ([]*jira.Issue, error) {
+	options := GetAllIssuesOptions{
+		Project:   project,
+		StartDate: fmt.Sprintf("-%dd", days),
+		DateField: "created",
+		OrderBy:   "created DESC",
+	}
+	return c.GetAllIssues(options)
 }

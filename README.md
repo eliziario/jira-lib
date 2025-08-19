@@ -166,11 +166,27 @@ client, err := lib.NewClient(lib.ClientConfig{
 ### Search Issues
 
 ```go
-// Search with JQL
+// Search with JQL (manual pagination)
 results, err := client.SearchIssues("project = PROJ AND status = 'In Progress'", 0, 50)
 for _, issue := range results.Issues {
     fmt.Printf("%s: %s\n", issue.Key, issue.Fields.Summary)
 }
+
+// Fetch ALL issues with automatic pagination
+allIssues, err := client.GetAllIssues(lib.GetAllIssuesOptions{
+    Project:   "PROJ",
+    StartDate: "2024-01-01",
+    DateField: "created",
+    JQL:       "status != Closed",
+    OrderBy:   "priority DESC",
+})
+fmt.Printf("Found %d total issues\n", len(allIssues))
+
+// Fetch issues from the last 7 days
+recentIssues, err := client.GetRecentIssues(7, "PROJ")
+
+// Fetch issues in a date range
+rangeIssues, err := client.GetIssuesByDateRange("2024-01-01", "2024-01-31", "updated")
 ```
 
 ### Create Issue
@@ -298,8 +314,9 @@ Check the [examples directory](examples/) for complete working examples:
 
 - **basic-usage** - Simple command-line tool demonstrating core operations
 - **advanced-cli** - Full-featured interactive CLI with configuration management
+- **fetch-all-issues** - Demonstrates fetching all issues with pagination and filtering
 
-Both examples were created specifically to demonstrate library usage patterns.
+All examples were created specifically to demonstrate library usage patterns.
 
 ## Supported Jira Features
 
